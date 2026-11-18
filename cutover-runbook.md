@@ -34,12 +34,12 @@ uplink at a time** when gluing a segment to an eero, or you create a bridging lo
 
 - [ ] UDM backup taken (done 0718) and a UniFi Protect export.
 - [ ] eero firmware updated on all 7 nodes NOW (keeps that restart out of the window).
-- [ ] UniFi OS Server VM155 (192.168.1.115) reachable; note which devices it has discovered.
+- [ ] UniFi OS Server VM155 (192.168.1.115) reachable, API responding; note discovered devices.
 - [ ] James has the SSID name and password the doorbell + 2 chimes use today (Claude cannot
       read the password; the eero must broadcast the same SSID so they rejoin).
 - [ ] Cables staged: the ONT->eero run, the eero-gateway 10G run to the XG-16, the 2x 10G
       SFP+ pair (SG3452XP to XG-16), and the UDM SFP+ LAN -> SG3452XP camera link.
-- [ ] James at the rack, phone in hand, ~45-60 min, tolerant of two ~8-min eero restarts.
+- [ ] James at the rack, phone in hand, tolerant of two ~8-min eero restarts.
 
 ## Current wiring (verified live 2026-11-18)
 
@@ -64,6 +64,11 @@ UDM Pro Max (gateway .1, UniFi controller)
   IW HD p3 -> eero Office Max 7 WAN (.238)   <- eero mesh currently gets internet via the UDM
 ```
 
+The 7 UniFi switches: US-XG-16 .254, US-48 .157, US-16-PoE .108, US-8 .104, US-8 Theater .8,
+USW Flex 2.5G .236, USW Flex 2.5G Basement Master .7. The UniFi APs (AC Pro, IW HD, two U7
+In-Walls) are being retired for the eeros and are NOT migrated; the U6 Lite stays for the
+doorbell + chimes and is handled in Phase 6.
+
 eero "Migration" network 21760076 (all 7 nodes green, wired): Office Max 7 = gateway
 (192.168.4.1), SG3452XP sits behind it (mgmt 192.168.4.120, temporary). eero LAN is
 192.168.4.0/24 today - a separate island behind the UDM.
@@ -78,10 +83,10 @@ US-XG-16 (L2 core, adopted by UniFi OS Server VM155)
   -> alice .50/.51 (10G)           KEEP WIRED THROUGHOUT
   -> CRS317 (10G), ugreen (10G), Flex Basement Master (10G, Sonos root)
   -> SG3452XP  2x 10G SFP+ LAG (ports 49-50)
-SG3452XP (Omada, behind nothing - hangs off the XG-16; clients + PoE cameras)
+SG3452XP (Omada, hangs off the XG-16; clients + PoE cameras)
   -> client + camera PoE ports
   -> SFP+ 51 -> UDM Pro Max SFP+ LAN  (camera VLAN 120 only)
-UDM Pro Max (cameras-only, Protect NVR, adopted-by-nobody - its own controller)
+UDM Pro Max (cameras-only, Protect NVR, its own controller)
   WAN: SFP+ to the flat LAN, static 192.168.1.16
   LAN: 192.168.120.0/24 (camera VLAN), DHCP on
   -> cameras, U6 Lite (doorbell + chimes) on camera VLAN
@@ -89,15 +94,35 @@ UDM Pro Max (cameras-only, Protect NVR, adopted-by-nobody - its own controller)
 
 ## Sequence
 
-Each phase ends with a verification gate. Claude checks live state before the next phase.
-Physical cable moves are interactive: James moves one thing, Claude confirms, then the next.
+Controller migration goes FIRST, on the stable UDM-gatewayed network, as its own change.
+Then the gateway flip. Each phase ends with a verification gate; Claude checks live state
+before the next. Physical cable moves are interactive: James moves one thing, Claude
+confirms, then the next.
 
 ### Phase 0 - prep, no outage
 1. Update eero firmware (all nodes), wait for green.
 2. Omada: on the SG3452XP create VLAN 120 "CAMERAS"; leave ports as-is for now.
-3. Confirm VM155 is ready to adopt (reachable, licensed, sees devices).
+3. Confirm VM155 reachable and ready to adopt (API responding, sees devices).
 
-### Phase 1 - give the eero real internet (no estate impact)
+### Phase 1 - migrate the UniFi switches to VM155 (UDM still gateway, network stable)
+The switches keep forwarding on their last config even with no controller, so this is low
+risk and independent of the gateway. Migrate by set-inform (keeps config, no factory-reset
+reboot) rather than forget-then-adopt (which reboots and drops everything downstream). Any
+controller provision can briefly bounce ports, so order it safest-first, XG-16 last.
+1. Leaf switches first: US-8 .104, US-8 Theater .8, then US-16-PoE .108. For each: point its
+   inform at `http://192.168.1.115:8080/inform`, adopt in VM155, confirm "Connected", confirm
+   downstream clients/cameras still up, THEN the next.
+2. The two USW Flex 2.5G (.236, .7) have NO SSH, so they cannot be set-inform'd from the CLI.
+   Migrate them through the VM155 adopt/migrate UI (or reset-and-adopt). The Basement Master
+   Flex carries the Sonos wired root - expect a brief Sonos blip; confirm Sonos back.
+3. US-48 .157 next (confirm the XG-16 and US-16-PoE beneath it stay up).
+4. US-XG-16 .254 LAST, by set-inform only, deliberately. It carries alice: if a provision
+   bounces its ports, alice NFS blips and the NFS-backed VMs hang until it returns (hard
+   mounts recover). Have James watching; confirm alice 10G and `pvecm status` quorate after.
+5. GATE: all 7 switches show "Connected" in VM155; alice 10G; Proxmox quorate; cameras in
+   Protect; Sonos playing. The UDM is still the gateway and internet is unchanged.
+
+### Phase 2 - give the eero real internet (no estate impact)
 1. Move the eero gateway WAN cable from UDM IW-HD p3 to the ONT.
 2. Set the eero WAN static: 46.110.77.225, mask 255.255.255.192, gw 46.110.77.193,
    DNS 1.1.1.1 / 1.0.0.1.
@@ -106,7 +131,7 @@ Physical cable moves are interactive: James moves one thing, Claude confirms, th
    - ONT ARP note: the ISP maps 46.110.77.225 to the UDM's MAC. If the eero has link but no
      internet, reboot the eero, then power-cycle the ONT, then call the ISP to clear ARP.
 
-### Phase 2 - apply the eero 192.168.1.0/24 config while it is still isolated
+### Phase 3 - apply the eero 192.168.1.0/24 config while it is still isolated
 The eero mesh must NOT be bridged to the 192.168.1.x L2 during this step (its backhaul is
 wireless / eero-to-eero only; no eero LAN port is plugged into a main UniFi switch yet).
 1. Claude (from docker01): `desired-from-unifi --exclude-mac c4:a8:16:47:ed:82` (fresh),
@@ -115,17 +140,27 @@ wireless / eero-to-eero only; no eero LAN port is plugged into a main UniFi swit
    9 forwards. TWO ~8-min mesh restarts. The estate keeps running on the UDM throughout.
 3. GATE: eero reports LAN 192.168.1.1, reservations/forwards present, mesh green.
 
-### Phase 3 - the flip (short changeover; alice stays on copper)
-Done quickly, in this order, to keep the dual-.1 window near zero:
-1. UDM: disable DHCP on the Default network; unplug the UDM WAN; change the UDM LAN IP off
-   .1 (set it to .16 now, or power down UDM routing). The 192.168.1.x L2 keeps switching on
-   the XG-16 - alice/Proxmox NFS unaffected (L2, no gateway needed).
-2. Connect the eero gateway LAN (10G) to the US-XG-16. The eero is now .1 for the whole L2.
-3. GATE: from a wired host, gateway is the eero, DHCP leases from .32-.254, internal names
-   resolve (AdGuard->DCs), internet works. Check alice still 10G, Proxmox `pvecm status`
-   quorate (4 votes).
+### Phase 4 - the flip (UDM leaves the gateway role FIRST; alice stays on copper)
+The UDM is BOTH the gateway and the physical root joining two switch subtrees: US-48 uplinks
+to UDM p10, and the Basement Master Flex (Sonos wired root + Nvidia .217) uplinks to UDM p3 -
+those two subtrees connect ONLY through the UDM. So do not pull it cold (that strands Sonos
+and stops Protect). Demote it, re-home the Sonos path first, keep it on as a dumb leaf.
+The UDM MUST stop being a gateway before the eero touches the L2, or you get two .1 gateways,
+two DHCP servers and a split DNS/default-route.
+1. Re-home the Basement Master Flex uplink (Sonos root, Nvidia .217) from UDM p3 to a free 10G
+   port on the US-XG-16 (SFP+ or an RJ45 13-16). Brief Sonos blip; confirm Sonos + Nvidia back
+   BEFORE continuing. The UDM now joins the L2 only via US-48 p49 -> UDM p10.
+2. UDM out of the gateway role: disable DHCP on Default; set the UDM LAN IP off .1 (to .16);
+   unplug the UDM WAN. No DHCP, no .1 - no conflict. It stays on the wire at .16 so Protect
+   keeps reaching the cameras (still on flat .1.x) through the migration.
+3. NOW connect the eero gateway LAN (10G) to the US-XG-16. The eero is the sole .1 gateway.
+   The UDM is a single-link leaf off US-48 p10, so no loop.
+4. GATE: wired host shows the eero as gateway, DHCP leases .32-.254, internal names resolve
+   (AdGuard->DCs), internet works. alice still 10G; Proxmox `pvecm status` quorate (4 votes);
+   Sonos playing. The 192.168.1.x L2 never lost switching on the XG-16, so alice/Proxmox NFS
+   was never interrupted.
 
-### Phase 4 - glue the rest with the eeros, finish wired runs
+### Phase 5 - glue the rest with the eeros, finish wired runs
 With the eero now the 192.168.1.x gateway, any eero LAN port is a 192.168.1.x access port
 and the mesh carries segments that are not yet wired. One uplink at a time (no loops).
 1. Bring up the SG3452XP 2x 10G LAG to the XG-16 (configure the LAG on both ends FIRST,
@@ -133,15 +168,6 @@ and the mesh carries segments that are not yet wired. One uplink at a time (no l
 2. Move client/AP segments onto their target ports; let eeros mesh any gap, auto-switching
    to wired as runs complete.
 3. GATE: all segments reachable; speed test from DRYAN01 near 5 Gbps; walk Wi-Fi.
-
-### Phase 5 - adopt the UniFi switches to VM155, one at a time
-Migrate by set-inform (keeps config, no factory reset) rather than forget-then-adopt where
-possible. Releasing/forgetting a switch reboots it and drops everything downstream, so:
-- Do leaf switches and APs first (US-8s, Flex .236, cameras' US-16-PoE last of the leaves).
-- The US-XG-16 is the alice-critical core: migrate it LAST and by set-inform only. If it
-  must reboot, know that alice NFS blips for the reboot window and the NFS-backed VMs hang
-  until it returns (hard mounts recover). Have James ready; do it deliberately, not casually.
-- Confirm each device shows "Connected" in VM155 before the next.
 
 ### Phase 6 - UDM to cameras-only (LAST)
 Per `home-wifi-overhaul-plan.md` "Cameras" section:
@@ -167,10 +193,11 @@ Per `home-wifi-overhaul-plan.md` "Cameras" section:
 - [ ] Proxmox: all 4 nodes quorate; no VM hung on NFS.
 
 ## Rollback
-- Phase 1-3: move the ONT cable back to the UDM WAN, re-enable UDM DHCP, set UDM LAN back to
-  .1, unplug the eero LAN from the XG-16. eero returns to the .4.x island. No data lost.
-- Phase 5: a switch that will not re-adopt keeps forwarding on its last config; re-point its
-  inform URL back, or adopt in VM155 fresh.
+- Phase 1: a switch that will not adopt to VM155 keeps forwarding on its last config; re-point
+  its inform URL back at the UDM, or adopt in VM155 fresh. No gateway change has happened yet.
+- Phase 2-4: unplug the eero LAN from the XG-16; set UDM LAN back to .1, re-enable UDM DHCP,
+  re-plug the UDM WAN; re-home the Basement Master Flex uplink back to UDM p3; move the ONT
+  cable back to the UDM WAN. eero returns to the .4.x island. No data lost.
 - Phase 6: move the ONT/camera cables back; UDM Default network back to .1; re-adopt cameras.
 
 ## Reference - full reservations and port map
